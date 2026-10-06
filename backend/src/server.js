@@ -16,6 +16,20 @@ app.disable('x-powered-by')
 app.use(helmet())
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }))
 app.use(express.json({ limit: '16kb' }))
+app.use('/api', async (_request, _response, next) => {
+  if (!isDatabaseConnected()) {
+    let timeout
+    try {
+      await Promise.race([
+        connectDB(),
+        new Promise((resolve) => { timeout = setTimeout(resolve, 3000) }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+  next()
+})
 
 app.get('/api/health', (_request, response) => {
   const databaseConnected = isDatabaseConnected()
@@ -32,9 +46,9 @@ app.use(notFoundMiddleware)
 app.use(errorMiddleware)
 
 async function startServer() {
-  await connectDB()
   const port = Number(process.env.PORT || 5000)
   app.listen(port, () => console.info(`API listening on http://localhost:${port}`))
+  void connectDB()
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -43,3 +57,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.exitCode = 1
   })
 }
+
+export default app

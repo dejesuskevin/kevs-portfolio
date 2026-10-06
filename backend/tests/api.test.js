@@ -1,22 +1,88 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import mongoose from 'mongoose'
-import { app } from '../src/server.js'
+import app, { app as namedApp } from '../src/server.js'
 import ContactMessage from '../src/models/ContactMessage.js'
 import Project from '../src/models/Project.js'
 
 let server
 let baseUrl
+const originalMongoUri = process.env.MONGODB_URI
 
 before(async () => {
+  process.env.MONGODB_URI = ''
   server = app.listen(0)
   await new Promise((resolve) => server.once('listening', resolve))
   baseUrl = `http://127.0.0.1:${server.address().port}`
 })
 
 after(async () => {
+  if (originalMongoUri === undefined) delete process.env.MONGODB_URI
+  else process.env.MONGODB_URI = originalMongoUri
   mongoose.connection.readyState = 0
   await new Promise((resolve) => server.close(resolve))
+})
+
+test('Vercel entry point exports the Express app', () => {
+  assert.equal(app, namedApp)
+  assert.equal(typeof app, 'function')
+})
+
+test('requests share one on-demand MongoDB connection', async () => {
+  const originalConnect = mongoose.connect
+  let attempts = 0
+  process.env.MONGODB_URI = 'mongodb://localhost:27017/test'
+  mongoose.connect = async () => {
+    attempts += 1
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    mongoose.connection.readyState = 1
+  }
+
+  try {
+    const responses = await Promise.all([
+      fetch(`${baseUrl}/api/health`),
+      fetch(`${baseUrl}/api/health`),
+    ])
+    assert.deepEqual(responses.map((response) => response.status), [200, 200])
+    assert.equal(attempts, 1)
+  } finally {
+    mongoose.connect = originalConnect
+    mongoose.connection.readyState = 0
+    process.env.MONGODB_URI = ''
+  }
+})
+
+test('health responds when a MongoDB connection stalls', async () => {
+  const originalConnect = mongoose.connect
+  let releaseConnection
+  process.env.MONGODB_URI = 'mongodb://localhost:27017/test'
+  mongoose.connect = () => new Promise((resolve) => { releaseConnection = resolve })
+
+  try {
+    const response = await fetch(`${baseUrl}/api/health`)
+    assert.equal(response.status, 503)
+    assert.equal((await response.json()).database, 'disconnected')
+  } finally {
+    releaseConnection?.()
+    await new Promise((resolve) => setImmediate(resolve))
+    mongoose.connect = originalConnect
+    process.env.MONGODB_URI = ''
+  }
+})
+
+test('MongoDB connection failures return an API response instead of crashing', async () => {
+  const originalConnect = mongoose.connect
+  process.env.MONGODB_URI = 'mongodb://localhost:27017/test'
+  mongoose.connect = async () => { throw new Error('Simulated connection failure') }
+
+  try {
+    const response = await fetch(`${baseUrl}/api/health`)
+    assert.equal(response.status, 503)
+    assert.equal((await response.json()).api, 'available')
+  } finally {
+    mongoose.connect = originalConnect
+    process.env.MONGODB_URI = ''
+  }
 })
 
 test('health reports a running API and unavailable database without credentials', async () => {
